@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pdf
+*.docx
+*.doc
+*.wps
+*.pptx
+*.ppt
+*.dps
+*.png
+*.jpg
+*.jpeg
+.DS_Store
+Thumbs.db
+*.log
