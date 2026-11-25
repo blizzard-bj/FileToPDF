@@ -1,7 +1,9 @@
 """
 文件转 PDF 工具（FileToPDF）
-支持格式：DOCX、DOC、WPS、PPTX、PPT、DPS
-原理：WPS COM 导出 PDF（保真渲染） → PyMuPDF 逐页转图 → img2pdf 打包
+支持格式：DOCX、DOC、WPS、PPTX、PPT、DPS、OFD
+原理：
+    Office 文件：WPS COM 导出 PDF（保真渲染） → PyMuPDF 逐页转图 → img2pdf 打包
+    OFD 文件：  ofd2pdf 渲染（ofd-cli 内核） → PyMuPDF 逐页转图 → img2pdf 打包
 """
 
 import os
@@ -68,7 +70,7 @@ class FileToPDF:
         if not input_path.exists():
             raise FileNotFoundError(f"输入文件不存在: {input_path}")
 
-        if not input_path.suffix.lower() in ('.docx', '.doc', '.wps', '.pptx', '.ppt', '.dps'):
+        if not input_path.suffix.lower() in ('.docx', '.doc', '.wps', '.pptx', '.ppt', '.dps', '.ofd'):
             raise ValueError(f"不支持的文件格式: {input_path.suffix}")
 
         # 创建临时目录
@@ -78,21 +80,30 @@ class FileToPDF:
         # 判断文件类型
         ppt_extensions = ('.pptx', '.ppt', '.dps')
         file_type = 'ppt' if input_path.suffix.lower() in ppt_extensions else 'doc'
+        is_ofd = input_path.suffix.lower() == '.ofd'
 
         try:
-            # ── 第一阶段：WPS COM 导出 PDF ──
-            print("[1/4] 启动 WPS 并打开文档...")
-            self._open_wps(input_path)
+            if is_ofd:
+                # ── OFD 流程：ofd2pdf 渲染 → 图片PDF ──
+                print("[1/3] ofd-cli 内核渲染 OFD 为 PDF...")
+                self._ofd_to_temp_pdf(input_path, temp_pdf)
 
-            print("[2/4] WPS 导出为 PDF（自身渲染，格式保真）...")
-            self._export_pdf(temp_pdf, file_type=file_type)
+                print("[2/3] 转换为图片 PDF...")
+                page_count = self._pdf_to_image_pdf(temp_pdf, output_path)
+            else:
+                # ── 第一阶段：WPS COM 导出 PDF ──
+                print("[1/4] 启动 WPS 并打开文档...")
+                self._open_wps(input_path)
 
-            # 关闭文档和 WPS（尽早释放资源）
-            print("[3/4] 关闭 WPS，开始转换图片...")
-            self._close_wps()
+                print("[2/4] WPS 导出为 PDF（自身渲染，格式保真）...")
+                self._export_pdf(temp_pdf, file_type=file_type)
 
-            # ── 第二阶段：PDF → 图片 → 图片PDF ──
-            page_count = self._pdf_to_image_pdf(temp_pdf, output_path)
+                # 关闭文档和 WPS（尽早释放资源）
+                print("[3/4] 关闭 WPS，开始转换图片...")
+                self._close_wps()
+
+                # ── 第二阶段：PDF → 图片 → 图片PDF ──
+                page_count = self._pdf_to_image_pdf(temp_pdf, output_path)
 
             # 统计结果
             file_size = output_path.stat().st_size / (1024 * 1024)
@@ -103,7 +114,7 @@ class FileToPDF:
                 "dpi": self.dpi,
             }
 
-            print("[4/4] 转换完成！")
+            print("[3/3] 转换完成！" if is_ofd else "[4/4] 转换完成！")
             print(f"      页数: {result['pages']}")
             print(f"      大小: {result['file_size_mb']} MB")
             print(f"      路径: {result['output_path']}")
@@ -116,6 +127,22 @@ class FileToPDF:
 
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # ───────────────────────────────────────────
+    #  OFD 转换（ofd2pdf / ofd-cli 内核）
+    # ───────────────────────────────────────────
+
+    def _ofd_to_temp_pdf(self, input_path: Path, temp_pdf: Path):
+        """使用 ofd2pdf 将 OFD 渲染为临时 PDF（需先 pip install ofd2pdf）"""
+        try:
+            from ofd2pdf import convert_ofd_to_pdf
+        except ImportError:
+            raise RuntimeError(
+                "转换 OFD 需要安装 ofd2pdf 库，请先执行: pip install ofd2pdf"
+            ) from None
+        convert_ofd_to_pdf(str(input_path), str(temp_pdf), dpi=self.dpi)
+        if not temp_pdf.exists():
+            raise RuntimeError(f"OFD 渲染失败，未生成中间 PDF: {temp_pdf}")
 
     # ───────────────────────────────────────────
     #  WPS COM 操作
@@ -596,7 +623,7 @@ $wps.Quit()
 def batch_convert(input_dir: str, output_dir: str, dpi=200, watermark_text=None, 
                   watermark_pos='center', watermark_opacity=0.2, watermark_font_size=0) -> dict:
     """
-    批量转换目录中的所有 docx/doc/wps 文件
+    批量转换目录中的所有 docx/doc/wps/pptx/ppt/dps/ofd 文件
     """
     input_path = Path(input_dir).resolve()
     output_path = Path(output_dir).resolve()
@@ -607,7 +634,7 @@ def batch_convert(input_dir: str, output_dir: str, dpi=200, watermark_text=None,
     if not output_path.exists():
         output_path.mkdir(parents=True, exist_ok=True)
 
-    supported_extensions = ('.docx', '.doc', '.wps', '.pptx', '.ppt', '.dps')
+    supported_extensions = ('.docx', '.doc', '.wps', '.pptx', '.ppt', '.dps', '.ofd')
     files = sorted(input_path.glob('*'))
     docx_files = [f for f in files if f.suffix.lower() in supported_extensions]
 
@@ -661,7 +688,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="文件转 PDF 工具（支持 DOCX/DOC/WPS/PPTX/PPT/DPS）",
+        description="文件转 PDF 工具（支持 DOCX/DOC/WPS/PPTX/PPT/DPS/OFD）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -676,6 +703,10 @@ if __name__ == "__main__":
   批量转换:
     python FileToPDF.py --batch --input-dir ./docx --output-dir ./pdf
     python FileToPDF.py --batch --input-dir ./docx --output-dir ./pdf --dpi 300 --watermark "机密"
+
+  OFD 转换（需先 pip install ofd2pdf）:
+    python FileToPDF.py input.ofd output.pdf
+    python FileToPDF.py --batch --input-dir ./ofd --output-dir ./pdf
         """
     )
 
@@ -683,7 +714,7 @@ if __name__ == "__main__":
     parser.add_argument("--input-dir", help="批量转换时的输入目录（需要配合 --batch）")
     parser.add_argument("--output-dir", help="批量转换时的输出目录（需要配合 --batch）")
 
-    parser.add_argument("input", nargs='?', help="输入 docx/doc/wps/pptx/ppt/dps 文件路径（单文件模式）")
+    parser.add_argument("input", nargs='?', help="输入 docx/doc/wps/pptx/ppt/dps/ofd 文件路径（单文件模式）")
     parser.add_argument("output", nargs='?', help="输出 PDF 文件路径（单文件模式）")
 
     parser.add_argument(
